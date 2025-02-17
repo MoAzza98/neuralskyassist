@@ -29,55 +29,41 @@ import equal from 'fast-deep-equal';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 
-/** 
- * Detect iOS so we force fallback even if webkitSpeechRecognition exists.
- */
-function isIos(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  return /iPhone|iPad|iPod/i.test(navigator.userAgent);
-}
+const MIN_RECORD_DURATION_MS = 800;
+const MIN_AUDIO_FILE_SIZE = 1000;
 
 /**
- * Check if Web Speech is supported (but disable it on iOS).
+ * Returns a MediaRecorder instance for the microphone.
+ * Adjusts to a preferred MIME type; AssemblyAI expects PCM16 at 16000 Hz.
  */
-function canUseWebSpeech(): boolean {
-  if (isIos()) {
-    return false;
+async function getMicrophoneRecorder(): Promise<MediaRecorder> {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  let mimeType: string | undefined;
+  const iosPreferred = ['audio/mp4', 'audio/mpeg'];
+  for (const mt of iosPreferred) {
+    if (MediaRecorder.isTypeSupported(mt)) {
+      mimeType = mt;
+      break;
+    }
   }
-  if (typeof window === 'undefined') return false;
-  const w = window as any;
-  return !!(w.SpeechRecognition || w.webkitSpeechRecognition);
-}
-
-/**
- * Pick a MIME type for MediaRecorder. On iOS, try 'audio/mp4' first.
- */
-function pickMimeType(): string | undefined {
-  if (isIos()) {
-    const iosPreferred = ['audio/mp4', 'audio/mpeg'];
-    for (const mt of iosPreferred) {
+  if (!mimeType) {
+    const preferred = [
+      'audio/webm; codecs=opus',
+      'audio/mp4; codecs=opus',
+      'audio/ogg; codecs=opus',
+    ];
+    for (const mt of preferred) {
       if (MediaRecorder.isTypeSupported(mt)) {
-        console.log('[Deepgram] Using iOS mimeType:', mt);
-        return mt;
+        mimeType = mt;
+        break;
       }
     }
   }
-  const preferred = [
-    'audio/webm; codecs=opus',
-    'audio/mp4; codecs=opus',
-    'audio/ogg; codecs=opus'
-  ];
-  for (const mt of preferred) {
-    if (MediaRecorder.isTypeSupported(mt)) {
-      console.log('[Deepgram] Using mimeType:', mt);
-      return mt;
-    }
-  }
-  return undefined;
+  const options: MediaRecorderOptions = mimeType
+    ? { mimeType, audioBitsPerSecond: 128000 }
+    : { audioBitsPerSecond: 128000 };
+  return new MediaRecorder(stream, options);
 }
-
-const MIN_RECORD_DURATION_MS = 800;
-const MIN_AUDIO_FILE_SIZE = 1000;
 
 function PureMultimodalInput({
   chatId,
@@ -104,30 +90,23 @@ function PureMultimodalInput({
   setMessages: Dispatch<SetStateAction<Array<Message>>>;
   append: (
     message: Message | CreateMessage,
-    chatRequestOptions?: ChatRequestOptions,
+    chatRequestOptions?: ChatRequestOptions
   ) => Promise<string | null | undefined>;
   handleSubmit: (
     event?: { preventDefault?: () => void },
-    chatRequestOptions?: ChatRequestOptions,
+    chatRequestOptions?: ChatRequestOptions
   ) => void;
   className?: string;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { width } = useWindowSize();
-
-  useEffect(() => {
-    if (textareaRef.current) {
-      adjustHeight();
-    }
-  }, []);
-
+  useEffect(() => { if (textareaRef.current) adjustHeight(); }, []);
   const adjustHeight = () => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${textareaRef.current.scrollHeight + 2}px`;
     }
   };
-
   const resetHeight = () => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -138,15 +117,11 @@ function PureMultimodalInput({
   const [localStorageInput, setLocalStorageInput] = useLocalStorage('input', '');
   useEffect(() => {
     if (textareaRef.current) {
-      const domValue = textareaRef.current.value;
-      const finalValue = domValue || localStorageInput || '';
-      setInput(finalValue);
+      setInput(textareaRef.current.value || localStorageInput || '');
       adjustHeight();
     }
   }, []);
-  useEffect(() => {
-    setLocalStorageInput(input);
-  }, [input, setLocalStorageInput]);
+  useEffect(() => { setLocalStorageInput(input); }, [input]);
 
   const handleInput = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(event.target.value);
@@ -155,17 +130,14 @@ function PureMultimodalInput({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadQueue, setUploadQueue] = useState<Array<string>>([]);
-
   const submitForm = useCallback(() => {
     window.history.replaceState({}, '', `/chat/${chatId}`);
     handleSubmit(undefined, { experimental_attachments: attachments });
     setAttachments([]);
     setLocalStorageInput('');
     resetHeight();
-    if (width && width > 768) {
-      textareaRef.current?.focus();
-    }
-  }, [attachments, handleSubmit, setAttachments, setLocalStorageInput, width, chatId]);
+    if (width && width > 768) textareaRef.current?.focus();
+  }, [attachments, handleSubmit, width, chatId]);
 
   const uploadFile = async (file: File) => {
     const formData = new FormData();
@@ -191,13 +163,8 @@ function PureMultimodalInput({
       try {
         const uploadPromises = files.map((file) => uploadFile(file));
         const uploadedAttachments = await Promise.all(uploadPromises);
-        const successfullyUploadedAttachments = uploadedAttachments.filter(
-          (attachment) => attachment !== undefined,
-        );
-        setAttachments((currentAttachments) => [
-          ...currentAttachments,
-          ...successfullyUploadedAttachments,
-        ]);
+        const successfullyUploadedAttachments = uploadedAttachments.filter(att => att !== undefined);
+        setAttachments((current) => [...current, ...successfullyUploadedAttachments]);
       } catch (error) {
         console.error('Error uploading files!', error);
         toast.error('Error uploading files!');
@@ -205,154 +172,98 @@ function PureMultimodalInput({
         setUploadQueue([]);
       }
     },
-    [setAttachments],
+    [setAttachments]
   );
 
-  // =========== HYBRID STT LOGIC ===========
+  // =========== ASSEMBLYAI STREAMING STT LOGIC ===========
   const [isRecording, setIsRecording] = useState(false);
-  // Web Speech references
-  const recognitionRef = useRef<any>(null);
-  // Deepgram references
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const deepgramSocketRef = useRef<WebSocket | null>(null);
-  const webSpeechSupported = canUseWebSpeech();
-  console.log('[MultimodalInput] webSpeechSupported:', webSpeechSupported);
   const recordStartRef = useRef<number>(0);
+  const assemblyaiSocketRef = useRef<WebSocket | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const dataIntervalRef = useRef<number>();
 
   const handleRecordClick = async () => {
     try {
       if (!isRecording) {
-        // START RECORDING
-        if (webSpeechSupported) {
-          console.log('Using Web Speech API...');
-          const SpeechRecognition =
-            (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-          const recognition = new SpeechRecognition();
-          recognitionRef.current = recognition;
-          recognition.lang = 'en-US'; // or navigator.language
-          recognition.interimResults = true;
-          let finalTranscript = '';
+        console.log('Starting AssemblyAI STT...');
+        const keyResponse = await fetch('/api/key');
+        const keyJson = await keyResponse.json();
+        const tempKey = keyJson.key;
+        if (!tempKey) throw new Error('Failed to obtain temporary AssemblyAI key.');
+        const socketUrl = `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&authorization=${tempKey}`;
+        const socket = new WebSocket(socketUrl);
+        assemblyaiSocketRef.current = socket;
 
-          recognition.onstart = () => {
-            setIsRecording(true);
-          };
-
-          recognition.onresult = (e: any) => {
-            let partial = '';
-            for (let i = 0; i < e.results.length; i++) {
-              partial += e.results[i][0].transcript;
-            }
-            finalTranscript = partial;
-            setInput(partial);
-          };
-
-          recognition.onerror = (err: any) => {
-            console.error('Web Speech error:', err);
-            toast.error(`Speech recognition error: ${err.message || err}`);
-          };
-
-          recognition.onend = () => {
-            setIsRecording(false);
-            if (!finalTranscript.trim()) {
-              toast.error('No meaningful speech detected.');
-            } else {
-              setInput(finalTranscript.trim());
-            }
-          };
-
-          recognition.start();
-        } else {
-          console.log('Using Deepgram fallback on iOS...');
-          // Fetch a temporary API key from your secure backend endpoint
-          const keyResponse = await fetch('/api/key');
-          const keyJson = await keyResponse.json();
-          const tempKey = keyJson.key;
-          if (!tempKey) {
-            throw new Error('Failed to obtain temporary Deepgram key.');
-          }
-          const encoding = isIos() ? 'linear16' : 'opus';
-          const socketUrl = `wss://api.deepgram.com/v1/listen?access_token=${tempKey}&encoding=${encoding}`;
-          const dgSocket = new WebSocket(socketUrl);
-          deepgramSocketRef.current = dgSocket;
-
-          dgSocket.onopen = () => {
-            console.log('[Deepgram] WebSocket open');
-            setIsRecording(true);
-            setInput('');
-            recordStartRef.current = Date.now();
-          };
-
-          dgSocket.onerror = (err) => {
-            console.error('[Deepgram] socket error:', err);
-            const errorMessage = err instanceof Error ? err.message : JSON.stringify(err);
-            toast.error(`Deepgram error: ${errorMessage}`);
-          };
-
-          dgSocket.onclose = () => {
-            console.log('[Deepgram] socket closed');
-            setIsRecording(false);
-          };
-
-          dgSocket.onmessage = (msg) => {
-            try {
-              const data = JSON.parse(msg.data);
-              if (data.channel) {
-                const alt = data.channel.alternatives[0];
-                if (alt && alt.transcript) {
-                  setInput(alt.transcript);
-                }
+        socket.onopen = async () => {
+          console.log('AssemblyAI WebSocket open');
+          setIsRecording(true);
+          setInput('');
+          recordStartRef.current = Date.now();
+          try {
+            const recorder = await getMicrophoneRecorder();
+            mediaRecorderRef.current = recorder;
+            // Use a short timeslice to ensure rapid data sending.
+            recorder.start(250);
+            // As a fallback, request data manually every 250ms.
+            dataIntervalRef.current = window.setInterval(() => {
+              if (recorder.state === 'recording') {
+                recorder.requestData();
               }
-            } catch (parseError) {
-              console.error('Error parsing Deepgram message:', parseError);
-              const errMsg = parseError instanceof Error ? parseError.message : String(parseError);
-              toast.error(`Deepgram message parse error: ${errMsg}`);
-            }
-          };
-
-          const chosenMime = pickMimeType();
-          const options: MediaRecorderOptions = chosenMime
-            ? { mimeType: chosenMime, audioBitsPerSecond: 128000 }
-            : { audioBitsPerSecond: 128000 };
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          const mediaRecorder = new MediaRecorder(stream, options);
-          mediaRecorderRef.current = mediaRecorder;
-
-          mediaRecorder.ondataavailable = (evt) => {
-            if (evt.data.size > 0 && dgSocket.readyState === WebSocket.OPEN) {
-              console.log('[Deepgram] sending chunk:', evt.data.size, 'bytes');
-              dgSocket.send(evt.data);
-            }
-          };
-
-          mediaRecorder.onstart = () => {
-            console.log('[Deepgram] mediaRecorder started...');
-          };
-
-          mediaRecorder.start(500);
-        }
-      } else {
-        // STOP RECORDING
-        if (webSpeechSupported) {
-          const recognition = recognitionRef.current;
-          if (recognition) {
-            recognition.stop();
+            }, 250);
+            recorder.ondataavailable = (evt) => {
+              if (evt.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+                socket.send(evt.data);
+              }
+            };
+          } catch (micError: any) {
+            console.error('Error accessing microphone:', micError);
+            toast.error('Error accessing microphone');
+            socket.close();
           }
-        } else {
-          const mediaRecorder = mediaRecorderRef.current;
-          if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-            mediaRecorder.stop();
-            mediaRecorder.stream.getTracks().forEach((track) => track.stop());
-          }
-          const dgSocket = deepgramSocketRef.current;
-          if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
-            dgSocket.close();
-          }
+        };
+
+        socket.onerror = (err) => {
+          console.error('AssemblyAI socket error:', err);
+          const errorMessage = err instanceof Error ? err.message : JSON.stringify(err);
+          toast.error(`AssemblyAI error: ${errorMessage}`);
+        };
+
+        socket.onclose = (event) => {
+          console.log('AssemblyAI socket closed', event);
           setIsRecording(false);
-          const duration = Date.now() - recordStartRef.current;
-          console.log(`[Deepgram] total recording duration: ${duration}ms`);
-          if (duration < MIN_RECORD_DURATION_MS) {
-            toast.error('Recording too short; no audio detected.');
+          if (dataIntervalRef.current) {
+            clearInterval(dataIntervalRef.current);
           }
+        };
+
+        socket.onmessage = (msg) => {
+          try {
+            const data = JSON.parse(msg.data);
+            if (data.text) {
+              setInput(data.text);
+            }
+          } catch (parseError) {
+            console.error('Error parsing AssemblyAI message:', parseError);
+            const errMsg = parseError instanceof Error ? parseError.message : String(parseError);
+            toast.error(`AssemblyAI message parse error: ${errMsg}`);
+          }
+        };
+      } else {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+          mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+        }
+        if (assemblyaiSocketRef.current && assemblyaiSocketRef.current.readyState === WebSocket.OPEN) {
+          assemblyaiSocketRef.current.close();
+        }
+        setIsRecording(false);
+        if (dataIntervalRef.current) {
+          clearInterval(dataIntervalRef.current);
+        }
+        const duration = Date.now() - recordStartRef.current;
+        console.log(`Total recording duration: ${duration}ms`);
+        if (duration < MIN_RECORD_DURATION_MS) {
+          toast.error('Recording too short; no audio detected.');
         }
       }
     } catch (err: any) {
@@ -366,7 +277,6 @@ function PureMultimodalInput({
       {messages.length === 0 && attachments.length === 0 && uploadQueue.length === 0 && (
         <SuggestedActions append={append} chatId={chatId} />
       )}
-
       <input
         type="file"
         className="fixed -top-4 -left-4 size-0.5 opacity-0 pointer-events-none"
@@ -375,22 +285,16 @@ function PureMultimodalInput({
         onChange={handleFileChange}
         tabIndex={-1}
       />
-
       {(attachments.length > 0 || uploadQueue.length > 0) && (
         <div className="flex flex-row gap-2 overflow-x-scroll items-end">
-          {attachments.map((attachment) => (
+          {attachments.map(attachment => (
             <PreviewAttachment key={attachment.url} attachment={attachment} />
           ))}
-          {uploadQueue.map((filename) => (
-            <PreviewAttachment
-              key={filename}
-              attachment={{ url: '', name: filename, contentType: '' }}
-              isUploading
-            />
+          {uploadQueue.map(filename => (
+            <PreviewAttachment key={filename} attachment={{ url: '', name: filename, contentType: '' }} isUploading />
           ))}
         </div>
       )}
-
       <Textarea
         ref={textareaRef}
         placeholder="Send a message..."
@@ -398,11 +302,11 @@ function PureMultimodalInput({
         onChange={handleInput}
         className={cx(
           'min-h-[24px] max-h-[calc(75dvh)] overflow-hidden resize-none rounded-2xl !text-base bg-muted pb-10 dark:border-zinc-700',
-          className,
+          className
         )}
         rows={2}
         autoFocus
-        onKeyDown={(event) => {
+        onKeyDown={event => {
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault();
             if (isLoading) {
@@ -413,16 +317,14 @@ function PureMultimodalInput({
           }
         }}
       />
-
       <div className="absolute bottom-0 p-2 w-fit flex flex-row justify-start">
         <AttachmentsButton fileInputRef={fileInputRef} isLoading={isLoading} />
       </div>
-
       <div className="absolute bottom-0 right-0 p-2 w-fit flex flex-row justify-end gap-2">
         <Button
           type="button"
           className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
-          onClick={(event) => {
+          onClick={event => {
             event.preventDefault();
             handleRecordClick();
           }}
@@ -447,7 +349,7 @@ export const MultimodalInput = memo(
     if (prevProps.isLoading !== nextProps.isLoading) return false;
     if (!equal(prevProps.attachments, nextProps.attachments)) return false;
     return true;
-  },
+  }
 );
 
 function PureAttachmentsButton({
@@ -461,7 +363,7 @@ function PureAttachmentsButton({
     <Button
       type="button"
       className="rounded-md rounded-bl-lg p-[7px] h-fit dark:border-zinc-700 hover:dark:bg-zinc-900 hover:bg-zinc-200"
-      onClick={(event) => {
+      onClick={event => {
         event.preventDefault();
         fileInputRef.current?.click();
       }}
@@ -486,10 +388,10 @@ function PureStopButton({
     <Button
       type="button"
       className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
-      onClick={(event) => {
+      onClick={event => {
         event.preventDefault();
         stop();
-        setMessages((messages) => sanitizeUIMessages(messages));
+        setMessages(messages => sanitizeUIMessages(messages));
       }}
     >
       <StopIcon size={14} />
@@ -512,7 +414,7 @@ function PureSendButton({
     <Button
       type="button"
       className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
-      onClick={(event) => {
+      onClick={event => {
         event.preventDefault();
         submitForm();
       }}
