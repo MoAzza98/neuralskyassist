@@ -65,7 +65,7 @@ function pickMimeType(): string | undefined {
   const preferred = [
     'audio/webm; codecs=opus',
     'audio/mp4; codecs=opus',
-    'audio/ogg; codecs=opus',
+    'audio/ogg; codecs=opus'
   ];
   for (const mt of preferred) {
     if (MediaRecorder.isTypeSupported(mt)) {
@@ -263,7 +263,7 @@ function PureMultimodalInput({
           recognition.start();
         } else {
           console.log('Using Deepgram fallback on iOS...');
-          // Fetch a temporary API key from your secure endpoint
+          // Fetch a temporary API key from your secure backend endpoint
           const keyResponse = await fetch('/api/key');
           const keyJson = await keyResponse.json();
           const tempKey = keyJson.key;
@@ -304,11 +304,8 @@ function PureMultimodalInput({
               }
             } catch (parseError) {
               console.error('Error parsing Deepgram message:', parseError);
-              if (parseError instanceof Error) {
-                toast.error(`Deepgram message parse error: ${parseError.message}`);
-              } else {
-                toast.error(`Deepgram message parse error: ${String(parseError)}`);
-              }
+              const errMsg = parseError instanceof Error ? parseError.message : String(parseError);
+              toast.error(`Deepgram message parse error: ${errMsg}`);
             }
           };
 
