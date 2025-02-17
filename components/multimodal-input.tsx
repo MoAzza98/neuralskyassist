@@ -33,8 +33,7 @@ import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 
 /** 
- * Explicitly detect iOS, so we can *force* fallback for Safari & Chrome on iOS
- * (They use the same WebKit engine).
+ * Detect iOS so we force fallback even if webkitSpeechRecognition exists.
  */
 function isIos(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -42,25 +41,33 @@ function isIos(): boolean {
 }
 
 /**
- * Check if Web Speech is supported, but disable it on iOS specifically.
+ * Check if Web Speech is supported (but disable it on iOS).
  */
 function canUseWebSpeech(): boolean {
   if (isIos()) {
-    // Force fallback for iOS:
     return false;
   }
   if (typeof window === 'undefined') return false;
-
   const w = window as any;
   return !!(w.SpeechRecognition || w.webkitSpeechRecognition);
 }
 
-/** For a potential fallback if iOS can’t handle 'audio/webm' */
+/**
+ * Pick a MIME type for MediaRecorder. On iOS, try 'audio/mp4' first.
+ */
 function pickMimeType(): string | undefined {
-  // Try a few common containers:
+  if (isIos()) {
+    const iosPreferred = ['audio/mp4', 'audio/mpeg'];
+    for (const mt of iosPreferred) {
+      if (MediaRecorder.isTypeSupported(mt)) {
+        console.log('[Deepgram] Using iOS mimeType:', mt);
+        return mt;
+      }
+    }
+  }
   const preferred = [
     'audio/webm; codecs=opus',
-    'audio/mp4; codecs=opus', // sometimes iOS picks this
+    'audio/mp4; codecs=opus',
     'audio/ogg; codecs=opus'
   ];
   for (const mt of preferred) {
@@ -69,13 +76,11 @@ function pickMimeType(): string | undefined {
       return mt;
     }
   }
-  // If none are supported, let the browser pick a default
   return undefined;
 }
 
-// You can still keep these constants for your attachments logic, etc.
-const MIN_RECORD_DURATION_MS = 800;  // minimal record time
-const MIN_AUDIO_FILE_SIZE = 1000;    // minimal file size for "meaningful" audio
+const MIN_RECORD_DURATION_MS = 800;
+const MIN_AUDIO_FILE_SIZE = 1000;
 
 function PureMultimodalInput({
   chatId,
@@ -136,7 +141,6 @@ function PureMultimodalInput({
   };
 
   const [localStorageInput, setLocalStorageInput] = useLocalStorage('input', '');
-
   useEffect(() => {
     if (textareaRef.current) {
       const domValue = textareaRef.current.value;
@@ -144,8 +148,6 @@ function PureMultimodalInput({
       setInput(finalValue);
       adjustHeight();
     }
-    // Only run once after hydration
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -162,15 +164,12 @@ function PureMultimodalInput({
 
   const submitForm = useCallback(() => {
     window.history.replaceState({}, '', `/chat/${chatId}`);
-
     handleSubmit(undefined, {
       experimental_attachments: attachments,
     });
-
     setAttachments([]);
     setLocalStorageInput('');
     resetHeight();
-
     if (width && width > 768) {
       textareaRef.current?.focus();
     }
@@ -186,22 +185,15 @@ function PureMultimodalInput({
   const uploadFile = async (file: File) => {
     const formData = new FormData();
     formData.append('file', file);
-
     try {
       const response = await fetch('/api/files/upload', {
         method: 'POST',
         body: formData,
       });
-
       if (response.ok) {
         const data = await response.json();
         const { url, pathname, contentType } = data;
-
-        return {
-          url,
-          name: pathname,
-          contentType: contentType,
-        };
+        return { url, name: pathname, contentType };
       }
       const { error } = await response.json();
       toast.error(error);
@@ -214,14 +206,12 @@ function PureMultimodalInput({
     async (event: ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(event.target.files || []);
       setUploadQueue(files.map((file) => file.name));
-
       try {
         const uploadPromises = files.map((file) => uploadFile(file));
         const uploadedAttachments = await Promise.all(uploadPromises);
         const successfullyUploadedAttachments = uploadedAttachments.filter(
           (attachment) => attachment !== undefined,
         );
-
         setAttachments((currentAttachments) => [
           ...currentAttachments,
           ...successfullyUploadedAttachments,
@@ -250,9 +240,6 @@ function PureMultimodalInput({
 
   const recordStartRef = useRef<number>(0);
 
-  /**
-   * Called when user toggles the mic button
-   */
   const handleRecordClick = async () => {
     try {
       if (!isRecording) {
@@ -260,13 +247,11 @@ function PureMultimodalInput({
         if (webSpeechSupported) {
           console.log('Using Web Speech API...');
           const SpeechRecognition =
-            (window as any).SpeechRecognition ||
-            (window as any).webkitSpeechRecognition;
+            (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
           const recognition = new SpeechRecognition();
           recognitionRef.current = recognition;
-          recognition.lang = 'en-US'; // or navigator.language
+          recognition.lang = 'en-US'; // or use navigator.language
           recognition.interimResults = true;
-
           let finalTranscript = '';
 
           recognition.onstart = () => {
@@ -298,14 +283,16 @@ function PureMultimodalInput({
 
           recognition.start();
         } else {
-          // Fallback to Deepgram streaming
-          console.log('Using Deepgram fallback on iOS or other non-Web Speech browsers...');
-          const DG_KEY = 'YOUR_DEEPGRAM_API_KEY'; // <--- Replace with real or use a secure token
-          const socketUrl = 'wss://api.deepgram.com/v1/listen?encoding=opus';
-          const dgSocket = new WebSocket(socketUrl, ['token', DG_KEY]);
+          // Fallback: Deepgram streaming
+          console.log('Using Deepgram fallback on iOS...');
+          const DG_KEY = 'YOUR_DEEPGRAM_API_KEY'; // Replace with your secure token
+          // Use query parameters for authentication and set encoding appropriately
+          const encoding = isIos() ? 'linear16' : 'opus';
+          const socketUrl = `wss://api.deepgram.com/v1/listen?access_token=${DG_KEY}&encoding=${encoding}`;
+          const dgSocket = new WebSocket(socketUrl);
           deepgramSocketRef.current = dgSocket;
 
-          // Request mic
+          // Request microphone access
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
           dgSocket.onopen = () => {
@@ -327,18 +314,14 @@ function PureMultimodalInput({
 
           dgSocket.onmessage = (msg) => {
             const data = JSON.parse(msg.data);
-            // Typical structure from Deepgram:
-            // { channel: { alternatives: [ { transcript, confidence, ... } ], ... }, is_final, ... }
             if (data.channel) {
               const alt = data.channel.alternatives[0];
               if (alt && alt.transcript) {
-                // We can display partial transcripts
                 setInput(alt.transcript);
               }
             }
           };
 
-          // Decide on container
           const chosenMime = pickMimeType();
           const options: MediaRecorderOptions = chosenMime
             ? { mimeType: chosenMime, audioBitsPerSecond: 128000 }
@@ -357,7 +340,7 @@ function PureMultimodalInput({
             console.log('[Deepgram] mediaRecorder started...');
           };
 
-          mediaRecorder.start(300); 
+          mediaRecorder.start(300);
         }
       } else {
         // STOP
@@ -372,14 +355,11 @@ function PureMultimodalInput({
             mediaRecorder.stop();
             mediaRecorder.stream.getTracks().forEach((track) => track.stop());
           }
-
           const dgSocket = deepgramSocketRef.current;
           if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
             dgSocket.close();
           }
           setIsRecording(false);
-
-          // Optional: If you want to check duration or final text
           const duration = Date.now() - recordStartRef.current;
           console.log(`[Deepgram] total recording duration: ${duration}ms`);
           if (duration < MIN_RECORD_DURATION_MS) {
@@ -392,8 +372,6 @@ function PureMultimodalInput({
       toast.error('Cannot access microphone or speech API!');
     }
   };
-
-  // ========== UI RENDERING BELOW ==========
 
   return (
     <div className="relative w-full flex flex-col gap-4">
@@ -445,7 +423,6 @@ function PureMultimodalInput({
         onKeyDown={(event) => {
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault();
-
             if (isLoading) {
               toast.error('Please wait for the model to finish its response!');
             } else {
@@ -455,14 +432,11 @@ function PureMultimodalInput({
         }}
       />
 
-      {/* Attachments Button */}
       <div className="absolute bottom-0 p-2 w-fit flex flex-row justify-start">
         <AttachmentsButton fileInputRef={fileInputRef} isLoading={isLoading} />
       </div>
 
-      {/* Buttons on the right side */}
       <div className="absolute bottom-0 right-0 p-2 w-fit flex flex-row justify-end gap-2">
-        {/* Microphone button */}
         <Button
           type="button"
           className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
@@ -478,7 +452,6 @@ function PureMultimodalInput({
             <MicIcon className="w-4 h-4" />
           )}
         </Button>
-
         {isLoading ? (
           <StopButton stop={stop} setMessages={setMessages} />
         ) : (
