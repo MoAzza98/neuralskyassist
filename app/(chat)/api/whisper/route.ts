@@ -4,7 +4,6 @@ import path from 'path'
 import { promises as fsPromises } from 'fs'
 import { v4 as uuid } from 'uuid'
 import OpenAI from 'openai'
-import multer from 'multer'
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -16,11 +15,9 @@ if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir)
 }
 
-const upload = multer({ dest: tempDir })
-
 export async function POST(request: NextRequest) {
   try {
-    // 1) parse the formData from Next.js
+    // 1) Parse the formData from Next.js
     const formData = await request.formData()
     const file = formData.get('audio') as File
 
@@ -28,9 +25,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No audio file provided' }, { status: 400 })
     }
 
+    // Determine the file extension based on the MIME type
+    let extension = 'webm'
+    if (file.type.includes('ogg')) {
+      extension = 'ogg'
+    } else if (file.type.includes('mp4')) {
+      extension = 'mp4'
+    }
+
     // 2) Write the file to the local temp dir
     const buffer = Buffer.from(await file.arrayBuffer())
-    const tempFilename = `temp-${uuid()}.webm`
+    const tempFilename = `temp-${uuid()}.${extension}`
     const tempFilePath = path.join(tempDir, tempFilename)
     await fsPromises.writeFile(tempFilePath, buffer)
 
@@ -41,7 +46,7 @@ export async function POST(request: NextRequest) {
       response_format: 'text'
     })
 
-    // 4) Clean up
+    // 4) Clean up the temporary file
     await fsPromises.unlink(tempFilePath)
 
     return NextResponse.json({
