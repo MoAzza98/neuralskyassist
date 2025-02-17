@@ -33,12 +33,23 @@ import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 
 /**
- * Adjust constants to strike a balance on mobile/desktop
+ * We'll keep existing constants for attachments logic and other UI features,
+ * but remove the old fallback to /api/whisper, replacing it with real-time streaming to Deepgram.
  */
-const MIN_RECORD_DURATION_MS = 800;  // was 300
-const MIN_AUDIO_FILE_SIZE = 1000;    // was 2000
-const MIN_TRANSCRIPTION_LENGTH = 5;  // was 3
 
+/** Check if the browser supports Web Speech Recognition. */
+function canUseWebSpeech(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
+  );
+}
+
+/**
+ * This is your main "MultimodalInput" that:
+ * - Uses Web Speech API if supported
+ * - Else, uses a streaming approach to Deepgram over WebSocket
+ */
 function PureMultimodalInput({
   chatId,
   input,
@@ -123,7 +134,7 @@ function PureMultimodalInput({
   const [uploadQueue, setUploadQueue] = useState<Array<string>>([]);
 
   /**
-   * Normal text submission
+   * Handle normal text submission
    */
   const submitForm = useCallback(() => {
     window.history.replaceState({}, '', `/chat/${chatId}`);
@@ -200,110 +211,159 @@ function PureMultimodalInput({
     [setAttachments],
   );
 
-  // --- Whisper / Recording logic
+  // === Hybrid speech logic ===
   const [isRecording, setIsRecording] = useState(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordedChunksRef = useRef<Blob[]>([]);
-  const recordStartTimeRef = useRef<number>(0);
 
+  // For Web Speech
+  const recognitionRef = useRef<any>(null);
+
+  // For Deepgram streaming fallback
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const deepgramSocketRef = useRef<WebSocket | null>(null);
+
+  const webSpeechSupported = canUseWebSpeech();
+
+  /**
+   * Start or stop recording
+   */
   const handleRecordClick = async () => {
     try {
       if (!isRecording) {
-        // Start recording
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // START recording
+        if (webSpeechSupported) {
+          // 1) Use Web Speech
+          const SpeechRecognition =
+            (window as any).SpeechRecognition ||
+            (window as any).webkitSpeechRecognition;
+          const recognition = new SpeechRecognition();
+          recognitionRef.current = recognition;
 
-        /**
-         * If supported, request higher audioBitsPerSecond for better quality
-         */
-        let mimeType = '';
-        if (MediaRecorder.isTypeSupported('audio/webm; codecs=opus')) {
-          mimeType = 'audio/webm; codecs=opus';
-        } else if (MediaRecorder.isTypeSupported('audio/ogg; codecs=opus')) {
-          mimeType = 'audio/ogg; codecs=opus';
-        }
+          recognition.interimResults = true;
+          // Optionally set language from navigator:
+          recognition.lang = 'en-US'; // or navigator.language
+          let finalTranscript = '';
 
-        const options: MediaRecorderOptions = mimeType
-          ? { mimeType, audioBitsPerSecond: 128000 } // ~128kbps if possible
-          : { audioBitsPerSecond: 128000 };
+          recognition.onstart = () => {
+            setIsRecording(true);
+          };
 
-        const mediaRecorder = new MediaRecorder(stream, options);
-        mediaRecorderRef.current = mediaRecorder;
-        recordedChunksRef.current = [];
-        recordStartTimeRef.current = Date.now();
-
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            recordedChunksRef.current.push(event.data);
-          }
-        };
-
-        mediaRecorder.start();
-        setIsRecording(true);
-      } else {
-        // Stop recording
-        const mediaRecorder = mediaRecorderRef.current;
-        if (!mediaRecorder) return;
-
-        mediaRecorder.onstop = async () => {
-          const duration = Date.now() - recordStartTimeRef.current;
-          const blobType = mediaRecorder.mimeType || 'audio/webm; codecs=opus';
-          const audioBlob = new Blob(recordedChunksRef.current, { type: blobType });
-
-          // Stop tracks
-          mediaRecorder.stream.getTracks().forEach((track) => track.stop());
-
-          // 1) Check short recordings
-          if (duration < MIN_RECORD_DURATION_MS) {
-            toast.error('Recording too short; no audio detected.');
-            return;
-          }
-
-          // 2) Check size
-          if (audioBlob.size < MIN_AUDIO_FILE_SIZE) {
-            toast.error('No meaningful audio recorded.');
-            return;
-          }
-
-          // 3) Send to server
-          try {
-            const formData = new FormData();
-            const fileExtension = blobType.includes('ogg') ? 'ogg' : 'webm';
-            formData.append('audio', audioBlob, `recording.${fileExtension}`);
-
-            const res = await fetch('/api/whisper', {
-              method: 'POST',
-              body: formData,
-            });
-
-            if (!res.ok) {
-              toast.error('Transcription failed');
-              return;
+          recognition.onresult = (event: any) => {
+            let combined = '';
+            for (let i = 0; i < event.results.length; i++) {
+              combined += event.results[i][0].transcript;
             }
+            finalTranscript = combined;
+            // Show partial transcripts directly:
+            setInput(combined);
+          };
 
-            const data = await res.json();
-            if (data?.text) {
-              const trimmed = data.text.trim();
-              if (trimmed.length < MIN_TRANSCRIPTION_LENGTH) {
-                toast.error('No meaningful speech detected.');
-                return;
+          recognition.onerror = (err: any) => {
+            console.error('Web Speech error:', err);
+            toast.error('Speech recognition error');
+          };
+
+          recognition.onend = () => {
+            setIsRecording(false);
+            // finalize if needed
+            if (!finalTranscript.trim()) {
+              toast.error('No meaningful speech detected.');
+            } else {
+              setInput(finalTranscript.trim());
+            }
+          };
+
+          recognition.start();
+        } else {
+          // 2) Fallback: Deepgram WebSocket streaming
+          const DG_KEY = process.env.DEEPGRAM_API_KEY; // Replace or secure properly
+          if (!DG_KEY) {
+            throw new Error('Deepgram API key is not defined');
+          }
+          const socketUrl = `wss://api.deepgram.com/v1/listen?encoding=opus`;
+          const dgSocket = new WebSocket(socketUrl, ['token', DG_KEY]);
+          deepgramSocketRef.current = dgSocket;
+
+          // Attempt mic
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+          dgSocket.onopen = () => {
+            console.log('Deepgram socket open');
+            setIsRecording(true);
+            // Clear input so user sees fresh transcript
+            setInput('');
+          };
+
+          dgSocket.onerror = (err) => {
+            console.error('Deepgram socket error:', err);
+            toast.error('Deepgram error');
+          };
+
+          dgSocket.onclose = () => {
+            console.log('Deepgram socket closed');
+            setIsRecording(false);
+          };
+
+          // Handle incoming transcripts from Deepgram
+          dgSocket.onmessage = (message) => {
+            const data = JSON.parse(message.data);
+            /**
+             * Deepgram typically returns something like:
+             * data.channel.alternatives[0].transcript
+             * if data.is_final is true => final chunk
+             */
+            if (data.channel) {
+              const alt = data.channel.alternatives[0];
+              if (alt && alt.transcript) {
+                // We'll treat partial as live transcript
+                setInput(alt.transcript);
               }
-              setInput(input ? input + ' ' + trimmed : trimmed);
-            } else if (data?.error) {
-              // The server might return { error: 'No meaningful speech' } or similar
-              toast.error(data.error);
             }
-          } catch (e) {
-            console.error('Error transcribing audio', e);
-            toast.error('Error transcribing audio');
-          }
-        };
+          };
 
-        mediaRecorder.stop();
-        setIsRecording(false);
+          // Setup MediaRecorder in ~250ms chunks
+          const options: MediaRecorderOptions = {
+            mimeType: 'audio/webm; codecs=opus',
+            audioBitsPerSecond: 128000,
+          };
+          const mediaRecorder = new MediaRecorder(stream, options);
+          mediaRecorderRef.current = mediaRecorder;
+
+          // On each chunk, send to Deepgram
+          mediaRecorder.ondataavailable = (evt) => {
+            if (evt.data.size > 0 && dgSocket.readyState === WebSocket.OPEN) {
+              dgSocket.send(evt.data);
+            }
+          };
+
+          // Fire dataavailable ~250ms
+          mediaRecorder.start(250);
+        }
+      } else {
+        // STOP recording
+        if (webSpeechSupported) {
+          // Stop Web Speech
+          const recognition = recognitionRef.current;
+          if (recognition) {
+            recognition.stop();
+          }
+        } else {
+          // Close MediaRecorder & Deepgram socket
+          const mediaRecorder = mediaRecorderRef.current;
+          if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+            mediaRecorder.stream.getTracks().forEach((track) => track.stop());
+          }
+
+          const dgSocket = deepgramSocketRef.current;
+          if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+            dgSocket.close();
+          }
+          setIsRecording(false);
+        }
       }
-    } catch (error) {
-      console.error('Microphone access denied or error:', error);
-      toast.error('Cannot access microphone!');
+    } catch (err) {
+      console.error('Mic or STT error:', err);
+      toast.error('Cannot access microphone or speech API!');
     }
   };
 
@@ -374,7 +434,6 @@ function PureMultimodalInput({
 
       {/* Buttons on the right side */}
       <div className="absolute bottom-0 right-0 p-2 w-fit flex flex-row justify-end gap-2">
-        {/* Record button */}
         <Button
           type="button"
           className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
@@ -411,7 +470,6 @@ export const MultimodalInput = memo(
     if (prevProps.input !== nextProps.input) return false;
     if (prevProps.isLoading !== nextProps.isLoading) return false;
     if (!equal(prevProps.attachments, nextProps.attachments)) return false;
-
     return true;
   },
 );
