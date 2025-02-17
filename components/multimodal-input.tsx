@@ -65,7 +65,7 @@ function pickMimeType(): string | undefined {
   const preferred = [
     'audio/webm; codecs=opus',
     'audio/mp4; codecs=opus',
-    'audio/ogg; codecs=opus'
+    'audio/ogg; codecs=opus',
   ];
   for (const mt of preferred) {
     if (MediaRecorder.isTypeSupported(mt)) {
@@ -191,10 +191,16 @@ function PureMultimodalInput({
       try {
         const uploadPromises = files.map((file) => uploadFile(file));
         const uploadedAttachments = await Promise.all(uploadPromises);
-        const successfullyUploadedAttachments = uploadedAttachments.filter((attachment) => attachment !== undefined);
-        setAttachments((currentAttachments) => [...currentAttachments, ...successfullyUploadedAttachments]);
+        const successfullyUploadedAttachments = uploadedAttachments.filter(
+          (attachment) => attachment !== undefined,
+        );
+        setAttachments((currentAttachments) => [
+          ...currentAttachments,
+          ...successfullyUploadedAttachments,
+        ]);
       } catch (error) {
         console.error('Error uploading files!', error);
+        toast.error('Error uploading files!');
       } finally {
         setUploadQueue([]);
       }
@@ -242,7 +248,7 @@ function PureMultimodalInput({
 
           recognition.onerror = (err: any) => {
             console.error('Web Speech error:', err);
-            toast.error('Speech recognition error');
+            toast.error(`Speech recognition error: ${err.message || err}`);
           };
 
           recognition.onend = () => {
@@ -257,14 +263,13 @@ function PureMultimodalInput({
           recognition.start();
         } else {
           console.log('Using Deepgram fallback on iOS...');
-          // Instead of using a client-exposed key, fetch a temporary key from your secure endpoint.
+          // Fetch a temporary API key from your secure endpoint
           const keyResponse = await fetch('/api/key');
           const keyJson = await keyResponse.json();
           const tempKey = keyJson.key;
           if (!tempKey) {
             throw new Error('Failed to obtain temporary Deepgram key.');
           }
-          // For iOS, use 'linear16' encoding; for others, 'opus'
           const encoding = isIos() ? 'linear16' : 'opus';
           const socketUrl = `wss://api.deepgram.com/v1/listen?access_token=${tempKey}&encoding=${encoding}`;
           const dgSocket = new WebSocket(socketUrl);
@@ -279,7 +284,8 @@ function PureMultimodalInput({
 
           dgSocket.onerror = (err) => {
             console.error('[Deepgram] socket error:', err);
-            toast.error('Deepgram error');
+            const errorMessage = err instanceof Error ? err.message : JSON.stringify(err);
+            toast.error(`Deepgram error: ${errorMessage}`);
           };
 
           dgSocket.onclose = () => {
@@ -298,6 +304,11 @@ function PureMultimodalInput({
               }
             } catch (parseError) {
               console.error('Error parsing Deepgram message:', parseError);
+              if (parseError instanceof Error) {
+                toast.error(`Deepgram message parse error: ${parseError.message}`);
+              } else {
+                toast.error(`Deepgram message parse error: ${String(parseError)}`);
+              }
             }
           };
 
@@ -347,19 +358,17 @@ function PureMultimodalInput({
           }
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Mic or STT error:', err);
-      toast.error('Cannot access microphone or speech API!');
+      toast.error(`Cannot access microphone or speech API: ${err.message || err}`);
     }
   };
 
   return (
     <div className="relative w-full flex flex-col gap-4">
-      {messages.length === 0 &&
-        attachments.length === 0 &&
-        uploadQueue.length === 0 && (
-          <SuggestedActions append={append} chatId={chatId} />
-        )}
+      {messages.length === 0 && attachments.length === 0 && uploadQueue.length === 0 && (
+        <SuggestedActions append={append} chatId={chatId} />
+      )}
 
       <input
         type="file"
