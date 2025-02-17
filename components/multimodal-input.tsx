@@ -33,11 +33,11 @@ import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 
 /**
- * Adjust these constants as you see fit:
+ * Increased thresholds to be more forgiving on mobile:
  */
-const MIN_RECORD_DURATION_MS = 300;   // e.g., 0.3s
-const MIN_AUDIO_FILE_SIZE = 2000;     // e.g., 2 KB
-const MIN_TRANSCRIPTION_LENGTH = 3;   // at least 3 characters of text
+const MIN_RECORD_DURATION_MS = 800;    // was 300, now 800ms
+const MIN_AUDIO_FILE_SIZE = 1000;      // was 2000 bytes, now 1000
+const MIN_TRANSCRIPTION_LENGTH = 5;    // was 3 chars, now 5
 
 function PureMultimodalInput({
   chatId,
@@ -124,8 +124,7 @@ function PureMultimodalInput({
 
   /**
    * This function is used to handle the normal text submission
-   * to the /chat/{chatId} route. We'll leave it as-is, except
-   * you might want to remove or adapt the `window.history.replaceState`.
+   * to the /chat/{chatId} route.
    */
   const submitForm = useCallback(() => {
     window.history.replaceState({}, '', `/chat/${chatId}`);
@@ -246,11 +245,11 @@ function PureMultimodalInput({
           // Calculate recording duration
           const duration = Date.now() - recordStartTimeRef.current;
 
-          // Use the MIME type from the recorder or fallback to our default
+          // Use the MIME type from the recorder or fallback
           const blobType = mediaRecorder.mimeType || 'audio/webm; codecs=opus';
           const audioBlob = new Blob(recordedChunksRef.current, { type: blobType });
 
-          // Stop all media stream tracks to clear the recording indicator
+          // Stop all media stream tracks
           mediaRecorder.stream.getTracks().forEach((track) => track.stop());
 
           // 1) If recording is too short, skip transcription
@@ -268,7 +267,7 @@ function PureMultimodalInput({
           // Prepare and send the recording to your Whisper endpoint
           try {
             const formData = new FormData();
-            // Adjust the file extension based on the MIME type
+            // Adjust file extension based on the MIME type
             const fileExtension = blobType.includes('ogg') ? 'ogg' : 'webm';
             formData.append('audio', audioBlob, `recording.${fileExtension}`);
 
@@ -284,7 +283,9 @@ function PureMultimodalInput({
 
             const data = await res.json();
             if (data?.text) {
+              // Basic cleanup
               const trimmed = data.text.trim();
+              // Increase threshold to 5 chars
               if (trimmed.length < MIN_TRANSCRIPTION_LENGTH) {
                 toast.error('No meaningful speech detected.');
                 return;
