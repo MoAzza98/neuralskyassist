@@ -7,8 +7,7 @@ import type {
   Message,
 } from 'ai';
 import cx from 'classnames';
-import type React from 'react';
-import {
+import React, {
   useRef,
   useEffect,
   useState,
@@ -20,9 +19,7 @@ import {
 } from 'react';
 import { toast } from 'sonner';
 import { useLocalStorage, useWindowSize } from 'usehooks-ts';
-
 import { sanitizeUIMessages } from '@/lib/utils';
-
 import { ArrowUpIcon, PaperclipIcon, StopIcon } from './icons';
 import { PreviewAttachment } from './preview-attachment';
 import { Button } from './ui/button';
@@ -32,12 +29,18 @@ import equal from 'fast-deep-equal';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 
-/** 
+/**
  * Detect iOS so we force fallback even if webkitSpeechRecognition exists.
  */
 function isIos(): boolean {
   if (typeof navigator === 'undefined') return false;
   return /iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
+declare global {
+  interface Window {
+    deepgram: any;
+  }
 }
 
 /**
@@ -149,7 +152,6 @@ function PureMultimodalInput({
       adjustHeight();
     }
   }, []);
-
   useEffect(() => {
     setLocalStorageInput(input);
   }, [input, setLocalStorageInput]);
@@ -164,32 +166,20 @@ function PureMultimodalInput({
 
   const submitForm = useCallback(() => {
     window.history.replaceState({}, '', `/chat/${chatId}`);
-    handleSubmit(undefined, {
-      experimental_attachments: attachments,
-    });
+    handleSubmit(undefined, { experimental_attachments: attachments });
     setAttachments([]);
     setLocalStorageInput('');
     resetHeight();
     if (width && width > 768) {
       textareaRef.current?.focus();
     }
-  }, [
-    attachments,
-    handleSubmit,
-    setAttachments,
-    setLocalStorageInput,
-    width,
-    chatId,
-  ]);
+  }, [attachments, handleSubmit, setAttachments, setLocalStorageInput, width, chatId]);
 
   const uploadFile = async (file: File) => {
     const formData = new FormData();
     formData.append('file', file);
     try {
-      const response = await fetch('/api/files/upload', {
-        method: 'POST',
-        body: formData,
-      });
+      const response = await fetch('/api/files/upload', { method: 'POST', body: formData });
       if (response.ok) {
         const data = await response.json();
         const { url, pathname, contentType } = data;
@@ -209,13 +199,8 @@ function PureMultimodalInput({
       try {
         const uploadPromises = files.map((file) => uploadFile(file));
         const uploadedAttachments = await Promise.all(uploadPromises);
-        const successfullyUploadedAttachments = uploadedAttachments.filter(
-          (attachment) => attachment !== undefined,
-        );
-        setAttachments((currentAttachments) => [
-          ...currentAttachments,
-          ...successfullyUploadedAttachments,
-        ]);
+        const successfullyUploadedAttachments = uploadedAttachments.filter((attachment) => attachment !== undefined);
+        setAttachments((currentAttachments) => [...currentAttachments, ...successfullyUploadedAttachments]);
       } catch (error) {
         console.error('Error uploading files!', error);
       } finally {
@@ -227,13 +212,11 @@ function PureMultimodalInput({
 
   // =========== HYBRID STT LOGIC ===========
   const [isRecording, setIsRecording] = useState(false);
-
   // Web Speech references
   const recognitionRef = useRef<any>(null);
-
   // Deepgram references
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const deepgramSocketRef = useRef<WebSocket | null>(null);
+  const deepgramSocketRef = useRef<any>(null);
 
   const webSpeechSupported = canUseWebSpeech();
   console.log('[MultimodalInput] webSpeechSupported:', webSpeechSupported);
@@ -243,14 +226,14 @@ function PureMultimodalInput({
   const handleRecordClick = async () => {
     try {
       if (!isRecording) {
-        // START
+        // START RECORDING
         if (webSpeechSupported) {
           console.log('Using Web Speech API...');
           const SpeechRecognition =
             (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
           const recognition = new SpeechRecognition();
           recognitionRef.current = recognition;
-          recognition.lang = 'en-US'; // or use navigator.language
+          recognition.lang = 'en-US'; // or navigator.language
           recognition.interimResults = true;
           let finalTranscript = '';
 
@@ -283,54 +266,50 @@ function PureMultimodalInput({
 
           recognition.start();
         } else {
-          // Fallback: Deepgram streaming
+          // FALLBACK: Use Deepgram official client SDK streaming (for iOS)
           console.log('Using Deepgram fallback on iOS...');
-          const DG_KEY = process.env.YOUR_DEEPGRAM_API_KEY; // Replace with your secure token
-          // Use query parameters for authentication and set encoding appropriately
-          const encoding = isIos() ? 'linear16' : 'opus';
-          const socketUrl = `wss://api.deepgram.com/v1/listen?access_token=${DG_KEY}&encoding=${encoding}`;
-          const dgSocket = new WebSocket(socketUrl);
+          // Fetch a temporary API key from your server endpoint
+          const keyResponse = await fetch('/key');
+          const keyJson = await keyResponse.json();
+          const tempKey = keyJson.key;
+          // Assume deepgram SDK is available globally as window.deepgram
+          const { createClient } = window.deepgram;
+          const dgClient = createClient(tempKey);
+          // Create a live listening socket with desired options (model "nova", smart_format true)
+          const dgSocket = dgClient.listen.live({ model: 'nova', smart_format: true });
           deepgramSocketRef.current = dgSocket;
 
-          // Request microphone access
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-          dgSocket.onopen = () => {
+          // Set up Deepgram event handlers
+          dgSocket.on('open', () => {
             console.log('[Deepgram] WebSocket open');
             setIsRecording(true);
             setInput('');
             recordStartRef.current = Date.now();
-          };
-
-          dgSocket.onerror = (err) => {
+          });
+          dgSocket.on('Results', (data: any) => {
+            console.log('[Deepgram] Results:', data);
+            const transcriptDG = data.channel.alternatives[0].transcript;
+            if (transcriptDG) {
+              setInput(transcriptDG);
+            }
+          });
+          dgSocket.on('error', (err: any) => {
             console.error('[Deepgram] socket error:', err);
             toast.error('Deepgram error');
-          };
-
-          dgSocket.onclose = () => {
+          });
+          dgSocket.on('close', () => {
             console.log('[Deepgram] socket closed');
             setIsRecording(false);
-          };
+          });
 
-          dgSocket.onmessage = (msg) => {
-            const data = JSON.parse(msg.data);
-            if (data.channel) {
-              const alt = data.channel.alternatives[0];
-              if (alt && alt.transcript) {
-                setInput(alt.transcript);
-              }
-            }
-          };
-
-          const chosenMime = pickMimeType();
-          const options: MediaRecorderOptions = chosenMime
-            ? { mimeType: chosenMime, audioBitsPerSecond: 128000 }
-            : { audioBitsPerSecond: 128000 };
-          const mediaRecorder = new MediaRecorder(stream, options);
+          // Now, get microphone input and stream to Deepgram using MediaRecorder
+          const userMedia = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const mimeType = pickMimeType() || undefined;
+          const mediaRecorder = new MediaRecorder(userMedia, { mimeType, audioBitsPerSecond: 128000 });
           mediaRecorderRef.current = mediaRecorder;
 
           mediaRecorder.ondataavailable = (evt) => {
-            if (evt.data.size > 0 && dgSocket.readyState === WebSocket.OPEN) {
+            if (evt.data.size > 0 && dgSocket.readyState === dgSocket.OPEN) {
               console.log('[Deepgram] sending chunk:', evt.data.size, 'bytes');
               dgSocket.send(evt.data);
             }
@@ -340,10 +319,10 @@ function PureMultimodalInput({
             console.log('[Deepgram] mediaRecorder started...');
           };
 
-          mediaRecorder.start(300);
+          mediaRecorder.start(500); // send chunks every 500ms
         }
       } else {
-        // STOP
+        // STOP RECORDING
         if (webSpeechSupported) {
           const recognition = recognitionRef.current;
           if (recognition) {
@@ -356,7 +335,7 @@ function PureMultimodalInput({
             mediaRecorder.stream.getTracks().forEach((track) => track.stop());
           }
           const dgSocket = deepgramSocketRef.current;
-          if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+          if (dgSocket && dgSocket.readyState === dgSocket.OPEN) {
             dgSocket.close();
           }
           setIsRecording(false);
@@ -398,11 +377,7 @@ function PureMultimodalInput({
           {uploadQueue.map((filename) => (
             <PreviewAttachment
               key={filename}
-              attachment={{
-                url: '',
-                name: filename,
-                contentType: '',
-              }}
+              attachment={{ url: '', name: filename, contentType: '' }}
               isUploading
             />
           ))}
@@ -446,20 +421,12 @@ function PureMultimodalInput({
           }}
           variant={isRecording ? 'destructive' : 'default'}
         >
-          {isRecording ? (
-            <MicOffIcon className="w-4 h-4" />
-          ) : (
-            <MicIcon className="w-4 h-4" />
-          )}
+          {isRecording ? <MicOffIcon className="w-4 h-4" /> : <MicIcon className="w-4 h-4" />}
         </Button>
         {isLoading ? (
           <StopButton stop={stop} setMessages={setMessages} />
         ) : (
-          <SendButton
-            input={input}
-            submitForm={submitForm}
-            uploadQueue={uploadQueue}
-          />
+          <SendButton input={input} submitForm={submitForm} uploadQueue={uploadQueue} />
         )}
       </div>
     </div>
