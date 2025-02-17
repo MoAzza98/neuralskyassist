@@ -285,7 +285,7 @@ function PureMultimodalInput({
         } else {
           // Fallback: Deepgram streaming
           console.log('Using Deepgram fallback on iOS...');
-          const DG_KEY = 'YOUR_DEEPGRAM_API_KEY'; // Replace with your secure token
+          const DG_KEY = process.env.YOUR_DEEPGRAM_API_KEY; // Replace with your secure token
           // Use query parameters for authentication and set encoding appropriately
           const encoding = isIos() ? 'linear16' : 'opus';
           const socketUrl = `wss://api.deepgram.com/v1/listen?access_token=${DG_KEY}&encoding=${encoding}`;
