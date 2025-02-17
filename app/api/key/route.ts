@@ -1,9 +1,11 @@
 // /app/api/key/route.ts
 import { NextResponse } from 'next/server';
 import { createClient } from '@deepgram/sdk';
-import dotenv from 'dotenv';
 
-dotenv.config();
+if (process.env.NODE_ENV !== 'production') {
+  // Only load dotenv in development
+  require('dotenv').config();
+}
 
 const client = createClient(process.env.DEEPGRAM_API_KEY);
 

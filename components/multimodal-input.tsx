@@ -29,18 +29,12 @@ import equal from 'fast-deep-equal';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 
-/**
+/** 
  * Detect iOS so we force fallback even if webkitSpeechRecognition exists.
  */
 function isIos(): boolean {
   if (typeof navigator === 'undefined') return false;
   return /iPhone|iPad|iPod/i.test(navigator.userAgent);
-}
-
-declare global {
-  interface Window {
-    deepgram: any;
-  }
 }
 
 /**
@@ -113,9 +107,7 @@ function PureMultimodalInput({
     chatRequestOptions?: ChatRequestOptions,
   ) => Promise<string | null | undefined>;
   handleSubmit: (
-    event?: {
-      preventDefault?: () => void;
-    },
+    event?: { preventDefault?: () => void },
     chatRequestOptions?: ChatRequestOptions,
   ) => void;
   className?: string;
@@ -216,11 +208,9 @@ function PureMultimodalInput({
   const recognitionRef = useRef<any>(null);
   // Deepgram references
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const deepgramSocketRef = useRef<any>(null);
-
+  const deepgramSocketRef = useRef<WebSocket | null>(null);
   const webSpeechSupported = canUseWebSpeech();
   console.log('[MultimodalInput] webSpeechSupported:', webSpeechSupported);
-
   const recordStartRef = useRef<number>(0);
 
   const handleRecordClick = async () => {
@@ -266,50 +256,61 @@ function PureMultimodalInput({
 
           recognition.start();
         } else {
-          // FALLBACK: Use Deepgram official client SDK streaming (for iOS)
           console.log('Using Deepgram fallback on iOS...');
-          // Fetch a temporary API key from your server endpoint
-          const keyResponse = await fetch('/key');
+          // Instead of using a client-exposed key, fetch a temporary key from your secure endpoint.
+          const keyResponse = await fetch('/api/key');
           const keyJson = await keyResponse.json();
           const tempKey = keyJson.key;
-          // Assume deepgram SDK is available globally as window.deepgram
-          const { createClient } = window.deepgram;
-          const dgClient = createClient(tempKey);
-          // Create a live listening socket with desired options (model "nova", smart_format true)
-          const dgSocket = dgClient.listen.live({ model: 'nova', smart_format: true });
+          if (!tempKey) {
+            throw new Error('Failed to obtain temporary Deepgram key.');
+          }
+          // For iOS, use 'linear16' encoding; for others, 'opus'
+          const encoding = isIos() ? 'linear16' : 'opus';
+          const socketUrl = `wss://api.deepgram.com/v1/listen?access_token=${tempKey}&encoding=${encoding}`;
+          const dgSocket = new WebSocket(socketUrl);
           deepgramSocketRef.current = dgSocket;
 
-          // Set up Deepgram event handlers
-          dgSocket.on('open', () => {
+          dgSocket.onopen = () => {
             console.log('[Deepgram] WebSocket open');
             setIsRecording(true);
             setInput('');
             recordStartRef.current = Date.now();
-          });
-          dgSocket.on('Results', (data: any) => {
-            console.log('[Deepgram] Results:', data);
-            const transcriptDG = data.channel.alternatives[0].transcript;
-            if (transcriptDG) {
-              setInput(transcriptDG);
-            }
-          });
-          dgSocket.on('error', (err: any) => {
+          };
+
+          dgSocket.onerror = (err) => {
             console.error('[Deepgram] socket error:', err);
             toast.error('Deepgram error');
-          });
-          dgSocket.on('close', () => {
+          };
+
+          dgSocket.onclose = () => {
             console.log('[Deepgram] socket closed');
             setIsRecording(false);
-          });
+          };
 
-          // Now, get microphone input and stream to Deepgram using MediaRecorder
-          const userMedia = await navigator.mediaDevices.getUserMedia({ audio: true });
-          const mimeType = pickMimeType() || undefined;
-          const mediaRecorder = new MediaRecorder(userMedia, { mimeType, audioBitsPerSecond: 128000 });
+          dgSocket.onmessage = (msg) => {
+            try {
+              const data = JSON.parse(msg.data);
+              if (data.channel) {
+                const alt = data.channel.alternatives[0];
+                if (alt && alt.transcript) {
+                  setInput(alt.transcript);
+                }
+              }
+            } catch (parseError) {
+              console.error('Error parsing Deepgram message:', parseError);
+            }
+          };
+
+          const chosenMime = pickMimeType();
+          const options: MediaRecorderOptions = chosenMime
+            ? { mimeType: chosenMime, audioBitsPerSecond: 128000 }
+            : { audioBitsPerSecond: 128000 };
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const mediaRecorder = new MediaRecorder(stream, options);
           mediaRecorderRef.current = mediaRecorder;
 
           mediaRecorder.ondataavailable = (evt) => {
-            if (evt.data.size > 0 && dgSocket.readyState === dgSocket.OPEN) {
+            if (evt.data.size > 0 && dgSocket.readyState === WebSocket.OPEN) {
               console.log('[Deepgram] sending chunk:', evt.data.size, 'bytes');
               dgSocket.send(evt.data);
             }
@@ -319,7 +320,7 @@ function PureMultimodalInput({
             console.log('[Deepgram] mediaRecorder started...');
           };
 
-          mediaRecorder.start(500); // send chunks every 500ms
+          mediaRecorder.start(500);
         }
       } else {
         // STOP RECORDING
@@ -335,7 +336,7 @@ function PureMultimodalInput({
             mediaRecorder.stream.getTracks().forEach((track) => track.stop());
           }
           const dgSocket = deepgramSocketRef.current;
-          if (dgSocket && dgSocket.readyState === dgSocket.OPEN) {
+          if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
             dgSocket.close();
           }
           setIsRecording(false);
