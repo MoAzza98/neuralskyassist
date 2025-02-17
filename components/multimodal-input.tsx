@@ -214,7 +214,17 @@ function PureMultimodalInput({
       if (!isRecording) {
         // Start recording
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const mediaRecorder = new MediaRecorder(stream);
+
+        // Determine a supported MIME type
+        let mimeType = '';
+        if (MediaRecorder.isTypeSupported('audio/webm; codecs=opus')) {
+          mimeType = 'audio/webm; codecs=opus';
+        } else if (MediaRecorder.isTypeSupported('audio/ogg; codecs=opus')) {
+          mimeType = 'audio/ogg; codecs=opus';
+        }
+        // Use the MIME type if available, otherwise let MediaRecorder pick a default
+        const options = mimeType ? { mimeType } : undefined;
+        const mediaRecorder = new MediaRecorder(stream, options);
         mediaRecorderRef.current = mediaRecorder;
         recordedChunksRef.current = [];
         recordStartTimeRef.current = Date.now(); // mark start time
@@ -233,34 +243,35 @@ function PureMultimodalInput({
         if (!mediaRecorder) return;
 
         mediaRecorder.onstop = async () => {
-          // Calculate how long the recording was
+          // Calculate recording duration
           const duration = Date.now() - recordStartTimeRef.current;
 
-          const audioBlob = new Blob(recordedChunksRef.current, {
-            type: 'audio/webm; codecs=opus',
-          });
+          // Use the MIME type from the recorder or fallback to our default
+          const blobType = mediaRecorder.mimeType || 'audio/webm; codecs=opus';
+          const audioBlob = new Blob(recordedChunksRef.current, { type: blobType });
 
-          // Stop all media stream tracks to remove the red recording dot
+          // Stop all media stream tracks to clear the recording indicator
           mediaRecorder.stream.getTracks().forEach((track) => track.stop());
 
-          // 1) If the user basically recorded no audio, skip
+          // 1) If recording is too short, skip transcription
           if (duration < MIN_RECORD_DURATION_MS) {
             toast.error('Recording too short; no audio detected.');
             return;
           }
 
-          // 2) If the file size is tiny, skip
+          // 2) If the file size is too small, skip transcription
           if (audioBlob.size < MIN_AUDIO_FILE_SIZE) {
             toast.error('No meaningful audio recorded.');
             return;
           }
 
-          // Now let's talk to Whisper
+          // Prepare and send the recording to your Whisper endpoint
           try {
             const formData = new FormData();
-            formData.append('audio', audioBlob, 'recording.webm');
+            // Adjust the file extension based on the MIME type
+            const fileExtension = blobType.includes('ogg') ? 'ogg' : 'webm';
+            formData.append('audio', audioBlob, `recording.${fileExtension}`);
 
-            // If your route is simply /api/whisper:
             const res = await fetch('/api/whisper', {
               method: 'POST',
               body: formData,
@@ -273,14 +284,13 @@ function PureMultimodalInput({
 
             const data = await res.json();
             if (data?.text) {
-              // 3) If text is too short, skip
               const trimmed = data.text.trim();
               if (trimmed.length < MIN_TRANSCRIPTION_LENGTH) {
                 toast.error('No meaningful speech detected.');
                 return;
               }
 
-              // Otherwise, set it in the input
+              // Update the input with the transcribed text
               setInput(input ? input + ' ' + trimmed : trimmed);
             }
           } catch (e) {
