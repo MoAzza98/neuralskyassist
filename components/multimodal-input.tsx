@@ -29,6 +29,15 @@ import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
 import { SuggestedActions } from './suggested-actions';
 import equal from 'fast-deep-equal';
+import MicIcon from '@mui/icons-material/Mic';
+import MicOffIcon from '@mui/icons-material/MicOff';
+
+/**
+ * Adjust these constants as you see fit:
+ */
+const MIN_RECORD_DURATION_MS = 300;   // e.g., 0.3s
+const MIN_AUDIO_FILE_SIZE = 2000;     // e.g., 2 KB
+const MIN_TRANSCRIPTION_LENGTH = 3;   // at least 3 characters of text
 
 function PureMultimodalInput({
   chatId,
@@ -88,15 +97,11 @@ function PureMultimodalInput({
     }
   };
 
-  const [localStorageInput, setLocalStorageInput] = useLocalStorage(
-    'input',
-    '',
-  );
+  const [localStorageInput, setLocalStorageInput] = useLocalStorage('input', '');
 
   useEffect(() => {
     if (textareaRef.current) {
       const domValue = textareaRef.current.value;
-      // Prefer DOM value over localStorage to handle hydration
       const finalValue = domValue || localStorageInput || '';
       setInput(finalValue);
       adjustHeight();
@@ -117,6 +122,11 @@ function PureMultimodalInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadQueue, setUploadQueue] = useState<Array<string>>([]);
 
+  /**
+   * This function is used to handle the normal text submission
+   * to the /chat/{chatId} route. We'll leave it as-is, except
+   * you might want to remove or adapt the `window.history.replaceState`.
+   */
   const submitForm = useCallback(() => {
     window.history.replaceState({}, '', `/chat/${chatId}`);
 
@@ -170,7 +180,6 @@ function PureMultimodalInput({
   const handleFileChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(event.target.files || []);
-
       setUploadQueue(files.map((file) => file.name));
 
       try {
@@ -192,6 +201,102 @@ function PureMultimodalInput({
     },
     [setAttachments],
   );
+
+  // --- Whisper / Recording logic
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  // We'll track the start time to see how long the recording was
+  const recordStartTimeRef = useRef<number>(0);
+
+  const handleRecordClick = async () => {
+    try {
+      if (!isRecording) {
+        // Start recording
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
+        recordedChunksRef.current = [];
+        recordStartTimeRef.current = Date.now(); // mark start time
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            recordedChunksRef.current.push(event.data);
+          }
+        };
+
+        mediaRecorder.start();
+        setIsRecording(true);
+      } else {
+        // Stop recording
+        const mediaRecorder = mediaRecorderRef.current;
+        if (!mediaRecorder) return;
+
+        mediaRecorder.onstop = async () => {
+          // Calculate how long the recording was
+          const duration = Date.now() - recordStartTimeRef.current;
+
+          const audioBlob = new Blob(recordedChunksRef.current, {
+            type: 'audio/webm; codecs=opus',
+          });
+
+          // Stop all media stream tracks to remove the red recording dot
+          mediaRecorder.stream.getTracks().forEach((track) => track.stop());
+
+          // 1) If the user basically recorded no audio, skip
+          if (duration < MIN_RECORD_DURATION_MS) {
+            toast.error('Recording too short; no audio detected.');
+            return;
+          }
+
+          // 2) If the file size is tiny, skip
+          if (audioBlob.size < MIN_AUDIO_FILE_SIZE) {
+            toast.error('No meaningful audio recorded.');
+            return;
+          }
+
+          // Now let's talk to Whisper
+          try {
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'recording.webm');
+
+            // If your route is simply /api/whisper:
+            const res = await fetch('/api/whisper', {
+              method: 'POST',
+              body: formData,
+            });
+
+            if (!res.ok) {
+              toast.error('Transcription failed');
+              return;
+            }
+
+            const data = await res.json();
+            if (data?.text) {
+              // 3) If text is too short, skip
+              const trimmed = data.text.trim();
+              if (trimmed.length < MIN_TRANSCRIPTION_LENGTH) {
+                toast.error('No meaningful speech detected.');
+                return;
+              }
+
+              // Otherwise, set it in the input
+              setInput(input ? input + ' ' + trimmed : trimmed);
+            }
+          } catch (e) {
+            console.error('Error transcribing audio', e);
+            toast.error('Error transcribing audio');
+          }
+        };
+
+        mediaRecorder.stop();
+        setIsRecording(false);
+      }
+    } catch (error) {
+      console.error('Microphone access denied or error:', error);
+      toast.error('Cannot access microphone!');
+    }
+  };
 
   return (
     <div className="relative w-full flex flex-col gap-4">
@@ -215,7 +320,6 @@ function PureMultimodalInput({
           {attachments.map((attachment) => (
             <PreviewAttachment key={attachment.url} attachment={attachment} />
           ))}
-
           {uploadQueue.map((filename) => (
             <PreviewAttachment
               key={filename}
@@ -224,7 +328,7 @@ function PureMultimodalInput({
                 name: filename,
                 contentType: '',
               }}
-              isUploading={true}
+              isUploading
             />
           ))}
         </div>
@@ -254,11 +358,30 @@ function PureMultimodalInput({
         }}
       />
 
+      {/* Attachments Button */}
       <div className="absolute bottom-0 p-2 w-fit flex flex-row justify-start">
         <AttachmentsButton fileInputRef={fileInputRef} isLoading={isLoading} />
       </div>
 
-      <div className="absolute bottom-0 right-0 p-2 w-fit flex flex-row justify-end">
+      {/* Buttons on the right side */}
+      <div className="absolute bottom-0 right-0 p-2 w-fit flex flex-row justify-end gap-2">
+        {/* Record button */}
+        <Button
+          type="button"
+          className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
+          onClick={(event) => {
+            event.preventDefault();
+            handleRecordClick();
+          }}
+          variant={isRecording ? 'destructive' : 'default'}
+        >
+          {isRecording ? (
+            <MicOffIcon className="w-4 h-4" />
+          ) : (
+            <MicIcon className="w-4 h-4" />
+          )}
+        </Button>
+
         {isLoading ? (
           <StopButton stop={stop} setMessages={setMessages} />
         ) : (
@@ -293,6 +416,7 @@ function PureAttachmentsButton({
 }) {
   return (
     <Button
+      type="button"
       className="rounded-md rounded-bl-lg p-[7px] h-fit dark:border-zinc-700 hover:dark:bg-zinc-900 hover:bg-zinc-200"
       onClick={(event) => {
         event.preventDefault();
@@ -317,6 +441,7 @@ function PureStopButton({
 }) {
   return (
     <Button
+      type="button"
       className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
       onClick={(event) => {
         event.preventDefault();
@@ -342,6 +467,7 @@ function PureSendButton({
 }) {
   return (
     <Button
+      type="button"
       className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
       onClick={(event) => {
         event.preventDefault();
@@ -355,8 +481,7 @@ function PureSendButton({
 }
 
 const SendButton = memo(PureSendButton, (prevProps, nextProps) => {
-  if (prevProps.uploadQueue.length !== nextProps.uploadQueue.length)
-    return false;
+  if (prevProps.uploadQueue.length !== nextProps.uploadQueue.length) return false;
   if (prevProps.input !== nextProps.input) return false;
   return true;
 });

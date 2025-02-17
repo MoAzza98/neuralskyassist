@@ -16,24 +16,24 @@ interface SuggestedActionsProps {
 function PureSuggestedActions({ chatId, append }: SuggestedActionsProps) {
   const suggestedActions = [
     {
-      title: 'What are the advantages',
-      label: 'of using Next.js?',
-      action: 'What are the advantages of using Next.js?',
+      title: 'قم بإنشاء محضر اجتماع',
+      label: 'لمجلس الإدارة',
+      action: 'قم بإنشاء محضر اجتماع لمجلس الإدارة',
     },
     {
-      title: 'Write code to',
-      label: `demonstrate djikstra's algorithm`,
-      action: `Write code to demonstrate djikstra's algorithm`,
+      title: 'ما المطلوب من مستشار قانوني',
+      label: `يدرس التحكيم الدولي؟`,
+      action: `ما المطلوب من مستشار قانوني يدرس التحكيم الدولي؟`,
     },
     {
-      title: 'Help me write an essay',
-      label: `about silicon valley`,
-      action: `Help me write an essay about silicon valley`,
+      title: 'أعطني نظرة عامة حول',
+      label: `الإرشادات الخاصة بالتحكيم الدولي`,
+      action: `أعطني نظرة عامة حول الإرشادات الخاصة بالتحكيم الدولي`,
     },
     {
-      title: 'What is the weather',
-      label: 'in San Francisco?',
-      action: 'What is the weather in San Francisco?',
+      title: 'ما هي الموارد التي يمكن',
+      label: 'أن تساعد محكِّمًا دوليًّا في اكتساب فهمٍ للتحكيم الدولي؟',
+      action: 'ما هي الموارد التي يمكن أن تساعد محكِّمًا دوليًّا في اكتساب فهمٍ للتحكيم الدولي؟',
     },
   ];
 

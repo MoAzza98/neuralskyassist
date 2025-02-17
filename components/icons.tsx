@@ -17,6 +17,50 @@ export const BotIcon = () => {
   );
 };
 
+export const MicOnIcon = ({ size = 16 }: { size?: number }) => {
+  return (
+    <svg
+      height={size}
+      width={size}
+      style={{ color: 'currentcolor' }}
+      viewBox="0 0 16 16"
+    >
+      <path
+        d="M8 10c1.3807 0 2.5-1.1193 2.5-2.5v-5a2.5 2.5 0 0 0-5 0v5c0 1.3807 1.1193 2.5 2.5 2.5zM12 7.5c0 2.4853-2.0147 4.5-4.5 4.5S3 9.9853 3 7.5H2c0 3.0389 2.2659 5.5327 5.1748 5.9492V15h1.6504v-1.5508C11.7341 13.0327 14 10.5389 14 7.5h-2z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+};
+
+export const MicOffIcon = ({ size = 16 }: { size?: number }) => {
+  return (
+    <svg
+      height={size}
+      width={size}
+      style={{ color: 'currentcolor' }}
+      viewBox="0 0 16 16"
+    >
+      {/* Mic shape */}
+      <path
+        d="M7.5 2.999A1.5 1.5 0 0 1 9 4.5v2.25l1.5 1.5V4.5c0-1.38071-1.1193-2.5-2.5-2.5S5.5 3.11929 5.5 4.5v2.5c0 .4036.097.785.27 1.127l1.062-1.061A1.46 1.46 0 0 1 7.5 6.75V2.999z"
+        fill="currentColor"
+      />
+      {/* Slash through mic */}
+      <path
+        d="M1.646 1.646l12.708 12.708.708-.708-12.708-12.708-.708.708z"
+        fill="currentColor"
+      />
+      {/* Bottom stand (same as mic-on icon but partly hidden by slash) */}
+      <path
+        d="M11.5 8.25v-.75H10a.75.75 0 0 0 0 1.5h.75c0 1.5188-1.2312 2.75-2.75 2.75S5.25 10.5188 5.25 9H3.75c0 2.2079 1.7921 4 4 4 .5416 0 1.0576-.11 1.5314-.31l-.987-.987a2.5313 2.5313 0 0 1-.5446.057c-1.2664 0-2.2974-1.0287-2.2491-2.2934l-1.5-1.5v.75C4 11.4604 5.5396 13 7.5 13c1.9481 0 3.4867-1.5386 3.5-3.4744l.5.5v-.7766l0-.9984z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+};
+
+
 export const UserIcon = () => {
   return (
     <svg
