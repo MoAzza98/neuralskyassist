@@ -10,9 +10,9 @@ const openai = new OpenAI({
 })
 
 // Create a local temp folder if it doesn't exist
-const tempDir = path.join(process.cwd(), 'temp')
+const tempDir = '/tmp/temp';
 if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir)
+  fs.mkdirSync(tempDir);
 }
 
 export async function POST(request: NextRequest) {
