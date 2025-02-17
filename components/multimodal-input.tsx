@@ -32,24 +32,51 @@ import equal from 'fast-deep-equal';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 
-/**
- * We'll keep existing constants for attachments logic and other UI features,
- * but remove the old fallback to /api/whisper, replacing it with real-time streaming to Deepgram.
+/** 
+ * Explicitly detect iOS, so we can *force* fallback for Safari & Chrome on iOS
+ * (They use the same WebKit engine).
  */
-
-/** Check if the browser supports Web Speech Recognition. */
-function canUseWebSpeech(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
-  );
+function isIos(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
 /**
- * This is your main "MultimodalInput" that:
- * - Uses Web Speech API if supported
- * - Else, uses a streaming approach to Deepgram over WebSocket
+ * Check if Web Speech is supported, but disable it on iOS specifically.
  */
+function canUseWebSpeech(): boolean {
+  if (isIos()) {
+    // Force fallback for iOS:
+    return false;
+  }
+  if (typeof window === 'undefined') return false;
+
+  const w = window as any;
+  return !!(w.SpeechRecognition || w.webkitSpeechRecognition);
+}
+
+/** For a potential fallback if iOS can’t handle 'audio/webm' */
+function pickMimeType(): string | undefined {
+  // Try a few common containers:
+  const preferred = [
+    'audio/webm; codecs=opus',
+    'audio/mp4; codecs=opus', // sometimes iOS picks this
+    'audio/ogg; codecs=opus'
+  ];
+  for (const mt of preferred) {
+    if (MediaRecorder.isTypeSupported(mt)) {
+      console.log('[Deepgram] Using mimeType:', mt);
+      return mt;
+    }
+  }
+  // If none are supported, let the browser pick a default
+  return undefined;
+}
+
+// You can still keep these constants for your attachments logic, etc.
+const MIN_RECORD_DURATION_MS = 800;  // minimal record time
+const MIN_AUDIO_FILE_SIZE = 1000;    // minimal file size for "meaningful" audio
+
 function PureMultimodalInput({
   chatId,
   input,
@@ -133,9 +160,6 @@ function PureMultimodalInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadQueue, setUploadQueue] = useState<Array<string>>([]);
 
-  /**
-   * Handle normal text submission
-   */
   const submitForm = useCallback(() => {
     window.history.replaceState({}, '', `/chat/${chatId}`);
 
@@ -211,50 +235,51 @@ function PureMultimodalInput({
     [setAttachments],
   );
 
-  // === Hybrid speech logic ===
+  // =========== HYBRID STT LOGIC ===========
   const [isRecording, setIsRecording] = useState(false);
 
-  // For Web Speech
+  // Web Speech references
   const recognitionRef = useRef<any>(null);
 
-  // For Deepgram streaming fallback
+  // Deepgram references
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const deepgramSocketRef = useRef<WebSocket | null>(null);
 
   const webSpeechSupported = canUseWebSpeech();
+  console.log('[MultimodalInput] webSpeechSupported:', webSpeechSupported);
+
+  const recordStartRef = useRef<number>(0);
 
   /**
-   * Start or stop recording
+   * Called when user toggles the mic button
    */
   const handleRecordClick = async () => {
     try {
       if (!isRecording) {
-        // START recording
+        // START
         if (webSpeechSupported) {
-          // 1) Use Web Speech
+          console.log('Using Web Speech API...');
           const SpeechRecognition =
             (window as any).SpeechRecognition ||
             (window as any).webkitSpeechRecognition;
           const recognition = new SpeechRecognition();
           recognitionRef.current = recognition;
-
-          recognition.interimResults = true;
-          // Optionally set language from navigator:
           recognition.lang = 'en-US'; // or navigator.language
+          recognition.interimResults = true;
+
           let finalTranscript = '';
 
           recognition.onstart = () => {
             setIsRecording(true);
           };
 
-          recognition.onresult = (event: any) => {
-            let combined = '';
-            for (let i = 0; i < event.results.length; i++) {
-              combined += event.results[i][0].transcript;
+          recognition.onresult = (e: any) => {
+            let partial = '';
+            for (let i = 0; i < e.results.length; i++) {
+              partial += e.results[i][0].transcript;
             }
-            finalTranscript = combined;
-            // Show partial transcripts directly:
-            setInput(combined);
+            finalTranscript = partial;
+            setInput(partial);
           };
 
           recognition.onerror = (err: any) => {
@@ -264,7 +289,6 @@ function PureMultimodalInput({
 
           recognition.onend = () => {
             setIsRecording(false);
-            // finalize if needed
             if (!finalTranscript.trim()) {
               toast.error('No meaningful speech detected.');
             } else {
@@ -274,80 +298,75 @@ function PureMultimodalInput({
 
           recognition.start();
         } else {
-          // 2) Fallback: Deepgram WebSocket streaming
-          const DG_KEY = process.env.DEEPGRAM_API_KEY; // Replace or secure properly
-          if (!DG_KEY) {
-            throw new Error('Deepgram API key is not defined');
-          }
-          const socketUrl = `wss://api.deepgram.com/v1/listen?encoding=opus`;
+          // Fallback to Deepgram streaming
+          console.log('Using Deepgram fallback on iOS or other non-Web Speech browsers...');
+          const DG_KEY = 'YOUR_DEEPGRAM_API_KEY'; // <--- Replace with real or use a secure token
+          const socketUrl = 'wss://api.deepgram.com/v1/listen?encoding=opus';
           const dgSocket = new WebSocket(socketUrl, ['token', DG_KEY]);
           deepgramSocketRef.current = dgSocket;
 
-          // Attempt mic
+          // Request mic
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
           dgSocket.onopen = () => {
-            console.log('Deepgram socket open');
+            console.log('[Deepgram] WebSocket open');
             setIsRecording(true);
-            // Clear input so user sees fresh transcript
             setInput('');
+            recordStartRef.current = Date.now();
           };
 
           dgSocket.onerror = (err) => {
-            console.error('Deepgram socket error:', err);
+            console.error('[Deepgram] socket error:', err);
             toast.error('Deepgram error');
           };
 
           dgSocket.onclose = () => {
-            console.log('Deepgram socket closed');
+            console.log('[Deepgram] socket closed');
             setIsRecording(false);
           };
 
-          // Handle incoming transcripts from Deepgram
-          dgSocket.onmessage = (message) => {
-            const data = JSON.parse(message.data);
-            /**
-             * Deepgram typically returns something like:
-             * data.channel.alternatives[0].transcript
-             * if data.is_final is true => final chunk
-             */
+          dgSocket.onmessage = (msg) => {
+            const data = JSON.parse(msg.data);
+            // Typical structure from Deepgram:
+            // { channel: { alternatives: [ { transcript, confidence, ... } ], ... }, is_final, ... }
             if (data.channel) {
               const alt = data.channel.alternatives[0];
               if (alt && alt.transcript) {
-                // We'll treat partial as live transcript
+                // We can display partial transcripts
                 setInput(alt.transcript);
               }
             }
           };
 
-          // Setup MediaRecorder in ~250ms chunks
-          const options: MediaRecorderOptions = {
-            mimeType: 'audio/webm; codecs=opus',
-            audioBitsPerSecond: 128000,
-          };
+          // Decide on container
+          const chosenMime = pickMimeType();
+          const options: MediaRecorderOptions = chosenMime
+            ? { mimeType: chosenMime, audioBitsPerSecond: 128000 }
+            : { audioBitsPerSecond: 128000 };
           const mediaRecorder = new MediaRecorder(stream, options);
           mediaRecorderRef.current = mediaRecorder;
 
-          // On each chunk, send to Deepgram
           mediaRecorder.ondataavailable = (evt) => {
             if (evt.data.size > 0 && dgSocket.readyState === WebSocket.OPEN) {
+              console.log('[Deepgram] sending chunk:', evt.data.size, 'bytes');
               dgSocket.send(evt.data);
             }
           };
 
-          // Fire dataavailable ~250ms
-          mediaRecorder.start(250);
+          mediaRecorder.onstart = () => {
+            console.log('[Deepgram] mediaRecorder started...');
+          };
+
+          mediaRecorder.start(300); 
         }
       } else {
-        // STOP recording
+        // STOP
         if (webSpeechSupported) {
-          // Stop Web Speech
           const recognition = recognitionRef.current;
           if (recognition) {
             recognition.stop();
           }
         } else {
-          // Close MediaRecorder & Deepgram socket
           const mediaRecorder = mediaRecorderRef.current;
           if (mediaRecorder && mediaRecorder.state !== 'inactive') {
             mediaRecorder.stop();
@@ -359,6 +378,13 @@ function PureMultimodalInput({
             dgSocket.close();
           }
           setIsRecording(false);
+
+          // Optional: If you want to check duration or final text
+          const duration = Date.now() - recordStartRef.current;
+          console.log(`[Deepgram] total recording duration: ${duration}ms`);
+          if (duration < MIN_RECORD_DURATION_MS) {
+            toast.error('Recording too short; no audio detected.');
+          }
         }
       }
     } catch (err) {
@@ -366,6 +392,8 @@ function PureMultimodalInput({
       toast.error('Cannot access microphone or speech API!');
     }
   };
+
+  // ========== UI RENDERING BELOW ==========
 
   return (
     <div className="relative w-full flex flex-col gap-4">
@@ -434,6 +462,7 @@ function PureMultimodalInput({
 
       {/* Buttons on the right side */}
       <div className="absolute bottom-0 right-0 p-2 w-fit flex flex-row justify-end gap-2">
+        {/* Microphone button */}
         <Button
           type="button"
           className="rounded-full p-1.5 h-fit border dark:border-zinc-600"
