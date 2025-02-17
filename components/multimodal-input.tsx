@@ -30,12 +30,7 @@ import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 
 const MIN_RECORD_DURATION_MS = 800;
-const MIN_AUDIO_FILE_SIZE = 1000;
 
-/**
- * Returns a MediaRecorder instance for the microphone.
- * Adjusts to a preferred MIME type; AssemblyAI expects PCM16 at 16000 Hz.
- */
 async function getMicrophoneRecorder(): Promise<MediaRecorder> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   let mimeType: string | undefined;
@@ -100,34 +95,22 @@ function PureMultimodalInput({
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { width } = useWindowSize();
-  useEffect(() => { if (textareaRef.current) adjustHeight(); }, []);
-  const adjustHeight = () => {
+  useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${textareaRef.current.scrollHeight + 2}px`;
     }
-  };
-  const resetHeight = () => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = '98px';
-    }
-  };
-
+  }, []);
   const [localStorageInput, setLocalStorageInput] = useLocalStorage('input', '');
   useEffect(() => {
     if (textareaRef.current) {
       setInput(textareaRef.current.value || localStorageInput || '');
-      adjustHeight();
     }
   }, []);
   useEffect(() => { setLocalStorageInput(input); }, [input]);
-
   const handleInput = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(event.target.value);
-    adjustHeight();
   };
-
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadQueue, setUploadQueue] = useState<Array<string>>([]);
   const submitForm = useCallback(() => {
@@ -135,10 +118,7 @@ function PureMultimodalInput({
     handleSubmit(undefined, { experimental_attachments: attachments });
     setAttachments([]);
     setLocalStorageInput('');
-    resetHeight();
-    if (width && width > 768) textareaRef.current?.focus();
-  }, [attachments, handleSubmit, width, chatId]);
-
+  }, [attachments, handleSubmit, chatId]);
   const uploadFile = async (file: File) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -146,8 +126,7 @@ function PureMultimodalInput({
       const response = await fetch('/api/files/upload', { method: 'POST', body: formData });
       if (response.ok) {
         const data = await response.json();
-        const { url, pathname, contentType } = data;
-        return { url, name: pathname, contentType };
+        return { url: data.url, name: data.pathname, contentType: data.contentType };
       }
       const { error } = await response.json();
       toast.error(error);
@@ -156,26 +135,28 @@ function PureMultimodalInput({
     }
   };
 
-  const handleFileChange = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(event.target.files || []);
-      setUploadQueue(files.map((file) => file.name));
-      try {
-        const uploadPromises = files.map((file) => uploadFile(file));
-        const uploadedAttachments = await Promise.all(uploadPromises);
-        const successfullyUploadedAttachments = uploadedAttachments.filter(att => att !== undefined);
-        setAttachments((current) => [...current, ...successfullyUploadedAttachments]);
-      } catch (error) {
-        console.error('Error uploading files!', error);
-        toast.error('Error uploading files!');
-      } finally {
-        setUploadQueue([]);
-      }
-    },
-    [setAttachments]
-  );
+const handleFileChange = useCallback(
+  async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    setUploadQueue(files.map(file => file.name));
+    try {
+      const uploadPromises = files.map(file => uploadFile(file));
+      const uploaded: (Attachment | undefined)[] = await Promise.all(uploadPromises);
+      const successfullyUploadedAttachments: Attachment[] = uploaded.filter(
+        (attachment): attachment is Attachment => attachment !== undefined
+      );
+      setAttachments(curr => [...curr, ...successfullyUploadedAttachments]);
+    } catch (error) {
+      console.error('Error uploading files!', error);
+      toast.error('Error uploading files!');
+    } finally {
+      setUploadQueue([]);
+    }
+  },
+  [setAttachments]
+);
 
-  // =========== ASSEMBLYAI STREAMING STT LOGIC ===========
+  // AssemblyAI streaming logic.
   const [isRecording, setIsRecording] = useState(false);
   const recordStartRef = useRef<number>(0);
   const assemblyaiSocketRef = useRef<WebSocket | null>(null);
@@ -186,11 +167,13 @@ function PureMultimodalInput({
     try {
       if (!isRecording) {
         console.log('Starting AssemblyAI STT...');
+        // Fetch temporary AssemblyAI key from backend.
         const keyResponse = await fetch('/api/key');
         const keyJson = await keyResponse.json();
         const tempKey = keyJson.key;
         if (!tempKey) throw new Error('Failed to obtain temporary AssemblyAI key.');
-        const socketUrl = `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&authorization=${tempKey}`;
+        const encodedKey = encodeURIComponent(tempKey);
+        const socketUrl = `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&authorization=${encodedKey}`;
         const socket = new WebSocket(socketUrl);
         assemblyaiSocketRef.current = socket;
 
@@ -202,19 +185,18 @@ function PureMultimodalInput({
           try {
             const recorder = await getMicrophoneRecorder();
             mediaRecorderRef.current = recorder;
-            // Use a short timeslice to ensure rapid data sending.
-            recorder.start(250);
-            // As a fallback, request data manually every 250ms.
-            dataIntervalRef.current = window.setInterval(() => {
-              if (recorder.state === 'recording') {
-                recorder.requestData();
-              }
-            }, 250);
             recorder.ondataavailable = (evt) => {
               if (evt.data.size > 0 && socket.readyState === WebSocket.OPEN) {
                 socket.send(evt.data);
               }
             };
+            recorder.start(250);
+            // Force data every 250ms as fallback.
+            dataIntervalRef.current = window.setInterval(() => {
+              if (recorder.state === 'recording') {
+                recorder.requestData();
+              }
+            }, 250);
           } catch (micError: any) {
             console.error('Error accessing microphone:', micError);
             toast.error('Error accessing microphone');
@@ -231,9 +213,7 @@ function PureMultimodalInput({
         socket.onclose = (event) => {
           console.log('AssemblyAI socket closed', event);
           setIsRecording(false);
-          if (dataIntervalRef.current) {
-            clearInterval(dataIntervalRef.current);
-          }
+          if (dataIntervalRef.current) clearInterval(dataIntervalRef.current);
         };
 
         socket.onmessage = (msg) => {
@@ -257,9 +237,7 @@ function PureMultimodalInput({
           assemblyaiSocketRef.current.close();
         }
         setIsRecording(false);
-        if (dataIntervalRef.current) {
-          clearInterval(dataIntervalRef.current);
-        }
+        if (dataIntervalRef.current) clearInterval(dataIntervalRef.current);
         const duration = Date.now() - recordStartRef.current;
         console.log(`Total recording duration: ${duration}ms`);
         if (duration < MIN_RECORD_DURATION_MS) {
