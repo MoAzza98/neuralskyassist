@@ -31,14 +31,13 @@ export const textBlock = new Block<'text', TextBlockMetadata>({
 
   /**
    * Runs once when the block is first created or loaded, e.g. to fetch suggestions.
-   * We'll keep your existing logic, but you could also detect Arabic from the initial content here
-   * if the block content is accessible. If not, we rely on onStreamPart or content-time detection.
    */
   initialize: async ({ documentId, setMetadata }) => {
     const suggestions = await getSuggestions({ documentId });
+    // <-- ADDED: Provide a default for language so it's never undefined.
     setMetadata({
-      suggestions,
-      // language will be set onStreamPart if we detect Arabic from GPT's streaming
+      suggestions: suggestions ?? [],
+      language: 'en',
     });
   },
 
@@ -48,11 +47,13 @@ export const textBlock = new Block<'text', TextBlockMetadata>({
    */
   onStreamPart: ({ streamPart, setMetadata, setBlock }) => {
     if (streamPart.type === 'suggestion') {
-      setMetadata((metadata) => {
+      setMetadata((prevMetadata) => {
+        // <-- ADDED: fallback so we never read from undefined
+        const safeMetadata = prevMetadata || { suggestions: [], language: 'en' };
         return {
-          ...metadata,
+          ...safeMetadata,
           suggestions: [
-            ...metadata.suggestions,
+            ...safeMetadata.suggestions,
             streamPart.content as Suggestion,
           ],
         };
@@ -62,11 +63,8 @@ export const textBlock = new Block<'text', TextBlockMetadata>({
     if (streamPart.type === 'text-delta') {
       setBlock((draftBlock) => {
         const newContent = draftBlock.content + (streamPart.content as string);
-
-        // We'll detect Arabic after we append
         const isArabic = isLikelyArabic(newContent);
 
-        // Return updated block content
         return {
           ...draftBlock,
           content: newContent,
@@ -81,18 +79,13 @@ export const textBlock = new Block<'text', TextBlockMetadata>({
       });
 
       // Also set the metadata.language
-      setMetadata((metadata) => {
-        const newContent = metadata?.suggestions
-          ? '' // we don't actually have the new block content here; we rely on the block above
-          : '';
-        // If needed, you could pass the appended content directly from the block update
-        // For now, we can just store isArabic
-        // Alternatively, you can do: setMetadata({ ...metadata, language: isArabic ? 'ar' : 'en' });
+      setMetadata((prevMetadata) => {
+        // <-- ADDED: fallback for metadata
+        const safeMetadata = prevMetadata || { suggestions: [], language: 'en' };
+        const isArabic = isLikelyArabic(streamPart.content as string);
         return {
-          ...metadata,
-          language: isLikelyArabic(streamPart.content as string)
-            ? 'ar'
-            : metadata.language ?? 'en',
+          ...safeMetadata,
+          language: isArabic ? 'ar' : safeMetadata.language ?? 'en',
         };
       });
     }
@@ -112,6 +105,7 @@ export const textBlock = new Block<'text', TextBlockMetadata>({
     getDocumentContentById,
     isLoading,
     metadata,
+    setMetadata, // <-- so we can update the metadata if user edits text
   }) => {
     if (isLoading) {
       return <DocumentSkeleton blockKind="text" />;
@@ -123,9 +117,12 @@ export const textBlock = new Block<'text', TextBlockMetadata>({
       return <DiffView oldContent={oldContent} newContent={newContent} />;
     }
 
+    // <-- ADDED: Provide a local safe fallback for metadata
+    const safeMetadata = metadata || { suggestions: [], language: 'en' };
+
     // Check if metadata says it's Arabic, or do a fallback check on content
     const isArabic =
-      metadata.language === 'ar' || isLikelyArabic(content || '');
+      safeMetadata.language === 'ar' || isLikelyArabic(content || '');
 
     return (
       // We'll wrap in a container that sets direction and alignment
@@ -136,23 +133,29 @@ export const textBlock = new Block<'text', TextBlockMetadata>({
         <div className="flex flex-row py-8 md:p-20 px-4">
           <Editor
             content={content}
-            suggestions={metadata ? metadata.suggestions : []}
+            // <-- Use safeMetadata.suggestions
+            suggestions={safeMetadata.suggestions}
             isCurrentVersion={isCurrentVersion}
             currentVersionIndex={currentVersionIndex}
             status={status}
+            // <-- UPDATED: onSaveContent now passes two args (content, debounce)
             onSaveContent={(updated) => {
               onSaveContent(updated, false);
 
-              // Check Arabic again on manual edits
+              // Check Arabic again on manual edits and update metadata
               const newlyArabic = isLikelyArabic(updated);
-              metadata.language = newlyArabic ? 'ar' : 'en';
+              setMetadata((prev) => {
+                const stablePrev = prev || { suggestions: [], language: 'en' };
+                return {
+                  ...stablePrev,
+                  language: newlyArabic ? 'ar' : 'en',
+                };
+              });
             }}
           />
 
           {/* Show empty space if suggestions exist (like your original code) */}
-          {metadata &&
-          metadata.suggestions &&
-          metadata.suggestions.length > 0 ? (
+          {safeMetadata.suggestions.length > 0 ? (
             <div className="md:hidden h-dvh w-12 shrink-0" />
           ) : null}
         </div>
