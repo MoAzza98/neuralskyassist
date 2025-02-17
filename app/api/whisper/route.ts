@@ -9,21 +9,20 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 })
 
-// Slightly lower threshold for file size so smaller mobile recordings still work:
-const MIN_AUDIO_FILE_SIZE = 1000; // bytes
-
-// Minimal length for valid transcription text (post-cleaning).
-const MIN_TRANSCRIPT_LENGTH = 5;
-
-// Create a /tmp/temp folder if it doesn't exist (Vercel only allows writes to /tmp).
-const tempDir = '/tmp/temp';
+// Only /tmp is writable on Vercel.
+// We'll store temp files there:
+const tempDir = '/tmp/temp'
 if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir);
+  fs.mkdirSync(tempDir)
 }
+
+// For short audio detection and minimal text checks
+const MIN_AUDIO_FILE_SIZE = 1000 // bytes
+const MIN_TRANSCRIPT_LENGTH = 5  // characters
 
 export async function POST(request: NextRequest) {
   try {
-    // 1) Parse the FormData from Next.js
+    // 1) Parse the formData
     const formData = await request.formData()
     const file = formData.get('audio') as File
 
@@ -31,7 +30,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No audio file provided' }, { status: 400 })
     }
 
-    // Determine the file extension based on the MIME type
+    // Determine extension from MIME
     let extension = 'webm'
     if (file.type.includes('ogg')) {
       extension = 'ogg'
@@ -39,8 +38,10 @@ export async function POST(request: NextRequest) {
       extension = 'mp4'
     }
 
-    // 2) Write the file to the local temp dir, but first check size
+    // 2) Write the file to /tmp
     const buffer = Buffer.from(await file.arrayBuffer())
+
+    // Check if file is large enough
     if (buffer.length < MIN_AUDIO_FILE_SIZE) {
       return NextResponse.json({ error: 'No meaningful audio recorded.' }, { status: 200 })
     }
@@ -49,18 +50,22 @@ export async function POST(request: NextRequest) {
     const tempFilePath = path.join(tempDir, tempFilename)
     await fsPromises.writeFile(tempFilePath, buffer)
 
-    // 3) Call the Whisper API
-    const transcription = await openai.audio.transcriptions.create({
+    // 3) Call OpenAI Whisper
+    // Optionally specify language if you always expect e.g. English:
+    const transcriptionText = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempFilePath),
       model: 'whisper-1',
-      response_format: 'text'
+      response_format: 'text',
+      // language: 'en',  // uncomment if you want to force English
     })
 
-    // 4) Clean up the temporary file
+    // 4) Clean up temp file
     await fsPromises.unlink(tempFilePath)
 
-    // Basic trimming / cleanup
-    const cleaned = transcription.trim().replace(/\s+/, ' ')
+    // Basic text cleanup
+    const cleaned = transcriptionText.trim().replace(/\s+/, ' ')
+
+    // If text is too short, consider it "no speech"
     if (cleaned.length < MIN_TRANSCRIPT_LENGTH) {
       return NextResponse.json({ error: 'No meaningful speech detected.' }, { status: 200 })
     }
@@ -68,8 +73,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       text: cleaned
     })
+
   } catch (err: any) {
     console.error('Error transcribing audio:', err)
-    return NextResponse.json({ error: err.message || 'Failed to transcribe audio' }, { status: 500 })
+    return NextResponse.json(
+      { error: err.message || 'Failed to transcribe audio' },
+      { status: 500 }
+    )
   }
 }
